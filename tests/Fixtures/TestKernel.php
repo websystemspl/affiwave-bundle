@@ -67,6 +67,17 @@ final class TestKernel extends Kernel
         });
     }
 
+    public function getProjectDir(): string
+    {
+        // Keeps Symfony from writing generated files (config/reference.php) into the repository.
+        $dir = sys_get_temp_dir().'/affiwave-bundle-tests/project';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+
+        return $dir;
+    }
+
     public function getCacheDir(): string
     {
         return sys_get_temp_dir().'/affiwave-bundle-tests/'.md5(serialize($this->affiwave)).'/cache';
