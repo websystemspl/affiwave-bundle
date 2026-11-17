@@ -1,0 +1,8 @@
+title = "affiwave-bundle"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dummy click token used by the tests (32 hex characters, not a credential)"
+regexes = ['''0123456789abcdef0123456789abcdef''']
