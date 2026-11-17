@@ -1,0 +1,67 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: PHP ${{ matrix.php }} / Symfony ${{ matrix.symfony }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+        symfony: ['7.4.*', '8.0.*', '8.1.*']
+        exclude:
+          # Symfony 8 needs PHP 8.4+
+          - php: '8.2'
+            symfony: '8.0.*'
+          - php: '8.3'
+            symfony: '8.0.*'
+          - php: '8.2'
+            symfony: '8.1.*'
+          - php: '8.3'
+            symfony: '8.1.*'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: intl, mbstring, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - name: Pin Symfony ${{ matrix.symfony }}
+        run: |
+          for package in config console dependency-injection event-dispatcher framework-bundle http-client http-foundation http-kernel routing; do
+            composer require --no-update "symfony/$package:${{ matrix.symfony }}"
+          done
+
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+
+      - name: PHPUnit
+        run: vendor/bin/phpunit
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: intl, mbstring, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+
+      - run: vendor/bin/phpstan analyse src --level 6
