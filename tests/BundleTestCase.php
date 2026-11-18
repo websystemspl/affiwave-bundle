@@ -20,11 +20,18 @@ abstract class BundleTestCase extends TestCase
     protected TestKernel $kernel;
     protected EntityManagerInterface $em;
 
+    /** @var callable|null */
+    private $exceptionHandlerBefore;
+    /** @var callable|null */
+    private $errorHandlerBefore;
+
     /**
      * @param array<string, mixed> $config `affiwave:` section
      */
     protected function boot(array $config = []): void
     {
+        $this->exceptionHandlerBefore = self::topExceptionHandler();
+        $this->errorHandlerBefore = self::topErrorHandler();
         $this->kernel = new TestKernel($config);
         $this->kernel->boot();
 
@@ -37,7 +44,30 @@ abstract class BundleTestCase extends TestCase
     {
         if (isset($this->kernel)) {
             $this->kernel->shutdown();
+            // Older FrameworkBundle versions leave the error/exception handlers they registered at boot behind.
+            while (self::topExceptionHandler() !== $this->exceptionHandlerBefore) {
+                restore_exception_handler();
+            }
+            while (self::topErrorHandler() !== $this->errorHandlerBefore) {
+                restore_error_handler();
+            }
         }
+    }
+
+    private static function topExceptionHandler(): ?callable
+    {
+        $handler = set_exception_handler(null);
+        restore_exception_handler();
+
+        return $handler;
+    }
+
+    private static function topErrorHandler(): ?callable
+    {
+        $handler = set_error_handler(static fn (): bool => false);
+        restore_error_handler();
+
+        return $handler;
     }
 
     /**

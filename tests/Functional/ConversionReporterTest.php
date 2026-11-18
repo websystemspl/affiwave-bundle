@@ -33,7 +33,7 @@ final class ConversionReporterTest extends BundleTestCase
     /**
      * @param list<MockResponse|callable> $responses
      */
-    private function reporter(array $responses, bool $enabled = true): ConversionReporter
+    private function reporter(array $responses, bool $enabled = true, int $maxAttempts = 20): ConversionReporter
     {
         $http = new MockHttpClient(function (string $method, string $url, array $options) use (&$responses): MockResponse {
             $this->requests[] = ['method' => $method, 'url' => $url, 'options' => $options];
@@ -43,7 +43,7 @@ final class ConversionReporterTest extends BundleTestCase
         });
         $settings = new Settings(apiUrl: $enabled ? 'https://affiwave.example/' : '', apiKey: $enabled ? 'secret-key' : '', httpTimeout: 5);
 
-        return new ConversionReporter(new AffiWaveClient($http, $settings), $this->em, new AffiWaveConversionRepository($this->em), $this->logger);
+        return new ConversionReporter(new AffiWaveClient($http, $settings), $this->em, new AffiWaveConversionRepository($this->em), $this->logger, $maxAttempts);
     }
 
     private static function json(array $body, int $status = 201): MockResponse
@@ -253,6 +253,94 @@ final class ConversionReporterTest extends BundleTestCase
         self::assertSame(ReportOutcome::Refunded, $result->outcome);
         self::assertSame('https://affiwave.example/api/conversion/refund', $this->requests[0]['url']);
         self::assertSame(['external_order_id' => 'in_1'], json_decode((string) $this->requests[0]['options']['body'], true));
+    }
+
+    public function testZeroAndThreeDecimalCurrenciesAreSentAsTwoDecimalMainUnits(): void
+    {
+        self::assertSame('1000.00', ConversionReporter::formatAmount(1000, 'JPY'));
+        self::assertSame('12.35', ConversionReporter::formatAmount(12345, 'KWD'));
+        self::assertSame('12.34', ConversionReporter::formatAmount(12344, 'kwd'));
+        self::assertSame('0.01', ConversionReporter::formatAmount(5, 'BHD'));
+        self::assertSame('0.00', ConversionReporter::formatAmount(4, 'BHD'));
+
+        $reporter = $this->reporter([self::json(['duplicate' => false, 'conversion_id' => 1]), self::json(['duplicate' => false, 'conversion_id' => 2])]);
+        $reporter->report(new Conversion('jp_1', 123456, 'jpy', self::TOKEN));
+        $reporter->report(new Conversion('kw_1', 12345, 'kwd', self::TOKEN));
+
+        $first = json_decode((string) $this->requests[0]['options']['body'], true);
+        $second = json_decode((string) $this->requests[1]['options']['body'], true);
+        self::assertSame(['123456.00', 'JPY'], [$first['amount'], $first['currency']]);
+        self::assertSame(['12.35', 'KWD'], [$second['amount'], $second['currency']]);
+        self::assertMatchesRegularExpression('/^\d{1,12}(\.\d{1,2})?$/', $second['amount']);
+    }
+
+    public function testInvalidEmailAndIpAreOmittedInsteadOfRejectingTheConversion(): void
+    {
+        $reporter = $this->reporter([self::json(['duplicate' => false, 'conversion_id' => 1]), self::json(['duplicate' => false, 'conversion_id' => 2]), self::json(['duplicate' => false, 'conversion_id' => 3])]);
+
+        $reporter->report(new Conversion('o1', 1000, 'EUR', self::TOKEN, customerEmail: 'not-an-email', customerIp: 'unknown'));
+        $reporter->report(new Conversion('o2', 1000, 'EUR', self::TOKEN, customerEmail: ' ok@example.com ', customerIp: 'unknown, 198.51.100.4, 10.0.0.1'));
+        $reporter->report(new Conversion('o3', 1000, 'EUR', self::TOKEN, customerIp: '2001:db8::1'));
+
+        $bodies = array_map(static fn (array $r): array => json_decode((string) $r['options']['body'], true), $this->requests);
+        self::assertArrayNotHasKey('customer_email', $bodies[0]);
+        self::assertArrayNotHasKey('customer_ip', $bodies[0]);
+        self::assertSame('ok@example.com', $bodies[1]['customer_email']);
+        self::assertSame('198.51.100.4', $bodies[1]['customer_ip']);
+        self::assertSame('2001:db8::1', $bodies[2]['customer_ip']);
+    }
+
+    public function testConversionIsGivenUpAfterMaxAttempts(): void
+    {
+        $reporter = $this->reporter([self::json([], 503), self::json([], 503), self::json([], 503)], maxAttempts: 2);
+
+        self::assertSame(ReportOutcome::Failed, $reporter->report($this->conversion())->outcome);
+        $row = $this->stored();
+        self::assertNotNull($row);
+
+        self::assertSame(ReportOutcome::Rejected, $reporter->deliver($row)->outcome);
+
+        $row = $this->stored();
+        self::assertSame(ConversionStatus::Rejected, $row?->getStatus());
+        self::assertStringContainsString('max_attempts_exceeded', (string) $row->getLastError());
+        self::assertStringContainsString('HTTP 503', (string) $row->getLastError());
+        self::assertSame(2, $row->getAttempts());
+        // Nothing more is sent for it.
+        self::assertSame(ReportOutcome::Rejected, $reporter->deliver($row)->outcome);
+        self::assertCount(2, $this->requests);
+    }
+
+    public function testRefundOfADeliveredConversionMarksItRefunded(): void
+    {
+        $reporter = $this->reporter([self::json(['duplicate' => false, 'conversion_id' => 1]), self::json(['refunded' => true], 200)]);
+        $reporter->report($this->conversion());
+
+        self::assertSame(ReportOutcome::Refunded, $reporter->refund('in_1')->outcome);
+        self::assertSame(ConversionStatus::Refunded, $this->stored()?->getStatus());
+        self::assertCount(2, $this->requests);
+
+        // Refunding again, or re-reporting, sends nothing.
+        self::assertSame(ReportOutcome::Refunded, $reporter->refund('in_1')->outcome);
+        self::assertSame(ReportOutcome::Refunded, $reporter->report($this->conversion())->outcome);
+        self::assertCount(2, $this->requests);
+    }
+
+    public function testRefundOfAnUndeliveredConversionIsLocalAndNeverSentLater(): void
+    {
+        $reporter = $this->reporter([self::json([], 503)]);
+        $reporter->report($this->conversion());
+        self::assertSame(ConversionStatus::Failed, $this->stored()?->getStatus());
+
+        $result = $reporter->refund('in_1');
+
+        self::assertSame(ReportOutcome::Refunded, $result->outcome);
+        self::assertSame(ConversionStatus::Refunded, $this->stored()?->getStatus());
+        self::assertCount(1, $this->requests, 'no refund request for an order AffiWave never got');
+        self::assertSame([], (new AffiWaveConversionRepository($this->em))->findRetryable());
+        $row = $this->stored();
+        self::assertNotNull($row);
+        self::assertSame(ReportOutcome::Refunded, $reporter->deliver($row)->outcome);
+        self::assertCount(1, $this->requests);
     }
 
     public function testRefundFailuresDoNotThrow(): void

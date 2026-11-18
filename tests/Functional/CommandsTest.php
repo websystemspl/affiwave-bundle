@@ -136,7 +136,6 @@ final class CommandsTest extends BundleTestCase
     {
         return new CommandTester(new SyncCouponsCommand(
             $this->client($responses),
-            $this->service(Settings::class),
             $this->service('event_dispatcher'),
             $this->service(StripeCouponSynchronizer::class),
         ));
@@ -188,6 +187,23 @@ final class CommandsTest extends BundleTestCase
 
         self::assertSame(Command::FAILURE, $tester->execute([]));
         self::assertStringContainsString('reports:read', $tester->getDisplay());
+    }
+
+    public function testRetryTakesTheLeastRecentlyAttemptedFirst(): void
+    {
+        $this->seedFailed(); // in_a, in_b failed, in_c rejected
+        // in_a (lower id) was attempted more recently than in_b.
+        $connection = $this->em->getConnection();
+        $connection->executeStatement("UPDATE affiwave_conversion SET last_attempt_at = '2026-11-01 10:00:00' WHERE external_order_id = 'in_a'");
+        $connection->executeStatement("UPDATE affiwave_conversion SET last_attempt_at = '2026-10-01 10:00:00' WHERE external_order_id = 'in_b'");
+        $this->em->clear();
+
+        $tester = $this->retryCommand($this->client([]));
+        $tester->execute(['--dry-run' => true]);
+        $lines = array_values(array_filter(explode("\n", $tester->getDisplay()), static fn (string $l): bool => str_starts_with($l, 'in_')));
+
+        self::assertStringStartsWith('in_b', $lines[0]);
+        self::assertStringStartsWith('in_a', $lines[1]);
     }
 
     public function testCouponSyncRejectsABadSinceDate(): void

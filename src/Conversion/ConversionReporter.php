@@ -9,6 +9,7 @@ use AffiWave\Bundle\Api\ApiResult;
 use AffiWave\Bundle\Attribution\ClickTokenResolver;
 use AffiWave\Bundle\Entity\AffiWaveConversion;
 use AffiWave\Bundle\Entity\ConversionStatus;
+use AffiWave\Bundle\Money\Currency;
 use AffiWave\Bundle\Repository\AffiWaveConversionRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
@@ -23,16 +24,23 @@ use Psr\Log\NullLogger;
  * - Nothing to attribute (no click token and no coupon) or amount <= 0: the result is `Skipped` and nothing is stored.
  * - A click token wins over a coupon: then only `click_token` is sent.
  * - Failures a retry can fix (5xx, 429, timeout, 401/403) leave the row `failed` for `affiwave:conversions:retry`;
- *   400/422 answers are final (`rejected`).
+ *   400/422 answers are final (`rejected`). After `conversions.max_attempts` failed attempts the row is given up
+ *   (`rejected`, reason in `last_error`).
+ * - A refund marks the stored row `refunded`; a conversion that was never delivered is only marked locally, and is
+ *   never sent afterwards.
  */
 class ConversionReporter
 {
+    private readonly int $maxAttempts;
+
     public function __construct(
         private readonly AffiWaveClient $client,
         private readonly EntityManagerInterface $em,
         private readonly AffiWaveConversionRepository $conversions,
         private readonly LoggerInterface $logger = new NullLogger(),
+        int|string $maxAttempts = 20,
     ) {
+        $this->maxAttempts = max(1, (int) $maxAttempts);
     }
 
     public function isEnabled(): bool
@@ -93,7 +101,16 @@ class ConversionReporter
         if ($entity->isDelivered()) {
             return new ReportResult(ReportOutcome::AlreadyReported, $entity);
         }
+        if (ConversionStatus::Refunded === $entity->getStatus()) {
+            return new ReportResult(ReportOutcome::Refunded, $entity);
+        }
         if (ConversionStatus::Rejected === $entity->getStatus()) {
+            return new ReportResult(ReportOutcome::Rejected, $entity, $entity->getLastError());
+        }
+        if ($entity->getAttempts() >= $this->maxAttempts) {
+            $entity->markRejected(\sprintf('max_attempts_exceeded: gave up after %d attempts; last error: %s', $entity->getAttempts(), (string) $entity->getLastError()));
+            $this->flushQuietly();
+
             return new ReportResult(ReportOutcome::Rejected, $entity, $entity->getLastError());
         }
 
@@ -102,6 +119,9 @@ class ConversionReporter
 
     /**
      * `POST /api/conversion/refund` for an order reported earlier. Never throws.
+     *
+     * The stored row becomes `refunded`. A conversion AffiWave never got (pending, failed or rejected) is only marked
+     * locally - nothing is sent now and it is never sent later.
      */
     public function refund(string $externalOrderId): ReportResult
     {
@@ -109,19 +129,42 @@ class ConversionReporter
             return new ReportResult(ReportOutcome::Disabled);
         }
 
+        $entity = null;
+        try {
+            $entity = $this->conversions->findOneByExternalOrderId($externalOrderId);
+            if (null !== $entity) {
+                if (ConversionStatus::Refunded === $entity->getStatus()) {
+                    return new ReportResult(ReportOutcome::Refunded, $entity);
+                }
+                if (!$entity->isDelivered()) {
+                    $entity->markRefunded();
+                    $this->em->flush();
+
+                    return new ReportResult(ReportOutcome::Refunded, $entity, 'never_delivered');
+                }
+            }
+        } catch (\Throwable $e) {
+            $this->logger->error('[AffiWave] reading conversion for refund failed', ['external_order_id' => $externalOrderId, 'error' => $e->getMessage()]);
+
+            return new ReportResult(ReportOutcome::Failed, message: $e->getMessage());
+        }
+
         try {
             $result = $this->client->refund($externalOrderId);
         } catch (\Throwable $e) {
             $this->logger->error('[AffiWave] refund failed', ['external_order_id' => $externalOrderId, 'error' => $e->getMessage()]);
 
-            return new ReportResult(ReportOutcome::Failed, message: $e->getMessage());
+            return new ReportResult(ReportOutcome::Failed, $entity, $e->getMessage());
         }
         if ($result->isSuccess()) {
-            return new ReportResult(ReportOutcome::Refunded, httpStatus: $result->status);
+            $entity?->markRefunded();
+            $this->flushQuietly();
+
+            return new ReportResult(ReportOutcome::Refunded, $entity, httpStatus: $result->status);
         }
         $this->logger->error('[AffiWave] refund not accepted', ['external_order_id' => $externalOrderId, 'status' => $result->status, 'error' => $result->errorCode()]);
 
-        return new ReportResult($this->isRetryable($result) ? ReportOutcome::Failed : ReportOutcome::Rejected, message: $result->summary(), httpStatus: $result->status);
+        return new ReportResult($this->isRetryable($result) ? ReportOutcome::Failed : ReportOutcome::Rejected, $entity, $result->summary(), $result->status);
     }
 
     private function send(AffiWaveConversion $entity): ReportResult
@@ -132,9 +175,8 @@ class ConversionReporter
         } catch (\Throwable $e) {
             $this->logger->error('[AffiWave] conversion report failed', ['external_order_id' => $entity->getExternalOrderId(), 'error' => $e->getMessage()]);
             $entity->markFailed($e->getMessage());
-            $this->flushQuietly();
 
-            return new ReportResult(ReportOutcome::Failed, $entity, $e->getMessage());
+            return $this->failed($entity, $e->getMessage(), null);
         }
 
         if ($result->isSuccess()) {
@@ -153,12 +195,27 @@ class ConversionReporter
         $retryable = $this->isRetryable($result);
         if ($retryable) {
             $entity->markFailed($result->summary());
-        } else {
-            $entity->markRejected($result->summary());
+
+            return $this->failed($entity, $result->summary(), $result->status);
+        }
+        $entity->markRejected($result->summary());
+        $this->flushQuietly();
+
+        return new ReportResult(ReportOutcome::Rejected, $entity, $result->summary(), $result->status);
+    }
+
+    /** A retryable failure was just recorded: give the row up once it used all its attempts. */
+    private function failed(AffiWaveConversion $entity, string $message, ?int $status): ReportResult
+    {
+        if ($entity->getAttempts() >= $this->maxAttempts) {
+            $entity->markRejected(\sprintf('max_attempts_exceeded: gave up after %d attempts; last error: %s', $entity->getAttempts(), $message));
+            $this->flushQuietly();
+
+            return new ReportResult(ReportOutcome::Rejected, $entity, $entity->getLastError(), $status);
         }
         $this->flushQuietly();
 
-        return new ReportResult($retryable ? ReportOutcome::Failed : ReportOutcome::Rejected, $entity, $result->summary(), $result->status);
+        return new ReportResult(ReportOutcome::Failed, $entity, $message, $status);
     }
 
     /** 5xx, 429, 408 and 401/403 (key, plan or programme state - fixable without code changes) are retried. */
@@ -174,14 +231,15 @@ class ConversionReporter
             ? ['click_token' => $entity->getClickToken()]
             : ['coupon' => (string) $entity->getCouponCode()];
         $payload += [
-            'amount' => self::formatAmount($entity->getAmountMinor()),
+            'amount' => self::formatAmount($entity->getAmountMinor(), $entity->getCurrency()),
             'currency' => $entity->getCurrency(),
             'external_order_id' => $entity->getExternalOrderId(),
             'occurred_at' => $entity->getOccurredAt()->format(\DATE_ATOM),
         ];
+        // AffiWave answers 400 to a malformed e-mail or IP, which would reject the whole conversion: omit them.
         $optional = [
-            'customer_email' => $entity->getCustomerEmail(),
-            'customer_ip' => $entity->getCustomerIp(),
+            'customer_email' => self::validEmail($entity->getCustomerEmail()),
+            'customer_ip' => self::validIp($entity->getCustomerIp()),
             'customer_user_agent' => $entity->getCustomerUserAgent(),
         ];
         foreach ($optional as $key => $value) {
@@ -193,10 +251,33 @@ class ConversionReporter
         return $payload;
     }
 
-    /** 9900 -> "99.00" (main units, always two decimals - what the API expects). */
-    public static function formatAmount(int $minor): string
+    /**
+     * 9900 -> "99.00": main units with two decimals, what the API expects. Zero-decimal currencies (JPY: 1000 ->
+     * "1000.00") and three-decimal ones (KWD: 12345 -> "12.35", rounded) are handled by {@see Currency}.
+     */
+    public static function formatAmount(int $minor, string $currency = ''): string
     {
-        return \sprintf('%s%d.%02d', $minor < 0 ? '-' : '', intdiv(abs($minor), 100), abs($minor) % 100);
+        return Currency::toApiAmount($minor, $currency);
+    }
+
+    private static function validEmail(?string $email): ?string
+    {
+        $email = null === $email ? '' : trim($email);
+
+        return '' !== $email && false !== filter_var($email, \FILTER_VALIDATE_EMAIL) ? $email : null;
+    }
+
+    /** Accepts a lone IP or an `X-Forwarded-For` style list (first valid address wins). */
+    private static function validIp(?string $ip): ?string
+    {
+        foreach (explode(',', (string) $ip) as $candidate) {
+            $candidate = trim($candidate);
+            if ('' !== $candidate && false !== filter_var($candidate, \FILTER_VALIDATE_IP)) {
+                return $candidate;
+            }
+        }
+
+        return null;
     }
 
     private function flushQuietly(): void

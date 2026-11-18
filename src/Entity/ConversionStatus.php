@@ -16,6 +16,8 @@ enum ConversionStatus: string
     case Rejected = 'rejected';
     /** Transient failure (outage, timeout, 429, 401/403 until the key/plan is fixed) - retried by the command. */
     case Failed = 'failed';
+    /** Refunded: sent to AffiWave as a refund, or never delivered and marked locally (then never sent). */
+    case Refunded = 'refunded';
 
     public function isDelivered(): bool
     {

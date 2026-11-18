@@ -38,6 +38,9 @@ class AffiWaveConversion
     #[ORM\Column(name: 'created_at')]
     private \DateTimeImmutable $createdAt;
 
+    #[ORM\Column(name: 'last_attempt_at', nullable: true)]
+    private ?\DateTimeImmutable $lastAttemptAt = null;
+
     #[ORM\Column(name: 'reported_at', nullable: true)]
     private ?\DateTimeImmutable $reportedAt = null;
 
@@ -157,6 +160,7 @@ class AffiWaveConversion
     public function startAttempt(): void
     {
         ++$this->attempts;
+        $this->lastAttemptAt = new \DateTimeImmutable();
     }
 
     public function markDelivered(bool $duplicate, ?string $conversionId, ?string $commissionAmount): void
@@ -178,5 +182,15 @@ class AffiWaveConversion
     {
         $this->status = ConversionStatus::Failed;
         $this->lastError = mb_substr($error, 0, 1000);
+    }
+
+    public function getLastAttemptAt(): ?\DateTimeImmutable
+    {
+        return $this->lastAttemptAt;
+    }
+
+    public function markRefunded(): void
+    {
+        $this->status = ConversionStatus::Refunded;
     }
 }

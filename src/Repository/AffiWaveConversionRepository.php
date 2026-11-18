@@ -20,7 +20,7 @@ class AffiWaveConversionRepository
     }
 
     /**
-     * Conversions still to deliver (pending or failed), oldest first.
+     * Conversions still to deliver (pending or failed), least recently attempted first, so old stuck rows do not starve new ones.
      *
      * @return list<AffiWaveConversion>
      */
@@ -28,11 +28,12 @@ class AffiWaveConversionRepository
     {
         /** @var list<AffiWaveConversion> */
         return $this->em->createQueryBuilder()
-            ->select('c')
+            ->select('c', 'COALESCE(c.lastAttemptAt, c.createdAt) AS HIDDEN lastTouch')
             ->from(AffiWaveConversion::class, 'c')
             ->where('c.status IN (:statuses)')
             ->setParameter('statuses', [ConversionStatus::Pending, ConversionStatus::Failed])
-            ->orderBy('c.id', 'ASC')
+            ->orderBy('lastTouch', 'ASC')
+            ->addOrderBy('c.id', 'ASC')
             ->setMaxResults(max(1, $limit))
             ->getQuery()
             ->getResult();
