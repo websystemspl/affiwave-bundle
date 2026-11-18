@@ -16,6 +16,8 @@ enum CouponSyncResult: string
     case Stale = 'stale';
     /** A refusal a retry will not fix - see `affiwave_coupon.sync_error`. */
     case Error = 'error';
+    /** Another delivery of the same new coupon is being processed (it claimed the mapping first). */
+    case InProgress = 'in_progress';
     /** Built-in synchronisation is off (`coupons.enabled: false`). */
     case Disabled = 'disabled';
 }

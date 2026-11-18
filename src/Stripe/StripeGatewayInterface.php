@@ -21,17 +21,18 @@ interface StripeGatewayInterface
 
     /**
      * @param array<string, mixed> $params
+     * @param string|null          $idempotencyKey Stripe `Idempotency-Key`; implementations should pass it on
      *
      * @return array<string, mixed>
      */
-    public function createCoupon(array $params): array;
+    public function createCoupon(array $params, ?string $idempotencyKey = null): array;
 
     /**
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
      */
-    public function createPromotionCode(array $params): array;
+    public function createPromotionCode(array $params, ?string $idempotencyKey = null): array;
 
     /**
      * @param array<string, mixed> $params

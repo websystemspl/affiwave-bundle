@@ -37,6 +37,10 @@ class AffiWaveCoupon
     #[ORM\Column(name: 'active')]
     private bool $active = false;
 
+    /** Counts Stripe create attempts; part of the idempotency key. */
+    #[ORM\Column(name: 'sync_attempts', options: ['default' => 0])]
+    private int $syncAttempts = 0;
+
     #[ORM\Column(name: 'sync_error', type: 'text', nullable: true)]
     private ?string $syncError = null;
 
@@ -174,5 +178,17 @@ class AffiWaveCoupon
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
+    }
+
+    public function getSyncAttempts(): int
+    {
+        return $this->syncAttempts;
+    }
+
+    public function nextSyncAttempt(): static
+    {
+        ++$this->syncAttempts;
+
+        return $this;
     }
 }

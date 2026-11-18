@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace AffiWave\Bundle\Command;
 
 use AffiWave\Bundle\Api\AffiWaveClient;
-use AffiWave\Bundle\Config\Settings;
 use AffiWave\Bundle\Coupon\CouponChangedEvent;
 use AffiWave\Bundle\Coupon\CouponState;
 use AffiWave\Bundle\Coupon\StripeCouponSynchronizer;
@@ -31,7 +30,6 @@ final class SyncCouponsCommand extends Command
 
     public function __construct(
         private readonly AffiWaveClient $client,
-        private readonly Settings $settings,
         private readonly EventDispatcherInterface $dispatcher,
         private readonly ?StripeCouponSynchronizer $synchronizer = null,
     ) {
@@ -87,11 +85,6 @@ final class SyncCouponsCommand extends Command
                 }
                 try {
                     $state = CouponState::fromApiItem($item);
-                    $programId = $this->settings->programId();
-                    if (null !== $programId && null !== $state->programId && $state->programId !== $programId) {
-                        $counts['other_program'] = ($counts['other_program'] ?? 0) + 1;
-                        continue;
-                    }
                     $eventAt = $this->changedAt($item);
                     $this->dispatcher->dispatch(new CouponChangedEvent($state, 'coupon.sync', $eventAt));
                     $key = null === $this->synchronizer ? 'dispatched' : $this->synchronizer->apply($state, $eventAt)->value;

@@ -86,9 +86,11 @@ final class WebhookController
         return new JsonResponse(['received' => true, 'handled' => true, 'result' => $result?->value]);
     }
 
-    /** Envelope `created_at` = when AffiWave queued the event (order of changes, not of deliveries). */
-    /** @param array<string, mixed> $event */
-    /** @param array<string, mixed> $event */
+    /**
+     * Envelope `created_at` = when AffiWave queued the event (order of changes, not of deliveries).
+     *
+     * @param array<string, mixed> $event
+     */
     private function eventAt(array $event): ?\DateTimeImmutable
     {
         $raw = $event['created_at'] ?? null;

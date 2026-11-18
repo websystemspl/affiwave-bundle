@@ -20,6 +20,8 @@ final class FakeStripeGateway implements StripeGatewayInterface
     public array $sessions = [];
     /** @var list<array{0: string, 1: array<string, mixed>}> */
     public array $calls = [];
+    /** @var list<string> idempotency keys of the create calls, in order */
+    public array $idempotencyKeys = [];
     /** null = OK, otherwise the HTTP status every write fails with */
     public ?int $failWith = null;
 
@@ -44,8 +46,9 @@ final class FakeStripeGateway implements StripeGatewayInterface
         return $this->promos[$promotionCodeId] ?? throw new StripeApiException('No such promotion code', 404);
     }
 
-    public function createCoupon(array $params): array
+    public function createCoupon(array $params, ?string $idempotencyKey = null): array
     {
+        $this->idempotencyKeys[] = (string) $idempotencyKey;
         $this->record('createCoupon', $params);
         $this->maybeFail();
         $id = 'co_'.(\count($this->coupons) + 1);
@@ -53,8 +56,9 @@ final class FakeStripeGateway implements StripeGatewayInterface
         return $this->coupons[$id] = ['id' => $id] + $params;
     }
 
-    public function createPromotionCode(array $params): array
+    public function createPromotionCode(array $params, ?string $idempotencyKey = null): array
     {
+        $this->idempotencyKeys[] = (string) $idempotencyKey;
         $this->record('createPromotionCode', $params);
         $this->maybeFail();
         $id = 'promo_'.(\count($this->promos) + 1);

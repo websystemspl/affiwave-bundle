@@ -55,7 +55,7 @@ final readonly class CouponState
     }
 
     /**
-     * From an item of `GET /api/coupon_codes` (camelCase; the programme may come as an IRI like `/api/programs/3`).
+     * From an item of `GET /api/coupon_codes` (camelCase). The API does not return the programme: narrow it down with a key bound to the programme.
      *
      * @param array<string, mixed> $item
      *
@@ -63,11 +63,6 @@ final readonly class CouponState
      */
     public static function fromApiItem(array $item): self
     {
-        $program = $item['programId'] ?? $item['program'] ?? null;
-        if (\is_string($program) && 1 === preg_match('~(\d+)$~', $program, $m)) {
-            $program = $m[1];
-        }
-
         return self::build(
             $item['id'] ?? null,
             $item['code'] ?? null,
@@ -77,7 +72,7 @@ final readonly class CouponState
             $item['status'] ?? null,
             $item['usageLimit'] ?? null,
             $item['expiresAt'] ?? null,
-            is_scalar($program) ? $program : null,
+            null,
             [],
         );
     }

@@ -9,9 +9,12 @@ use AffiWave\Bundle\Entity\AffiWaveCoupon;
 use AffiWave\Bundle\Repository\AffiWaveCouponRepository;
 use AffiWave\Bundle\Stripe\StripeApiException;
 use AffiWave\Bundle\Stripe\StripeGatewayInterface;
+use AffiWave\Bundle\Money\Currency;
+use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use Symfony\Component\Lock\LockFactory;
 
 /**
  * Brings Stripe to the state of an AffiWave partner coupon: a Stripe coupon plus a promotion code with the same
@@ -25,6 +28,9 @@ use Psr\Log\NullLogger;
  * - `fixed` amounts arrive GROSS. With `coupons.vat_rate` > 0 they are turned into the net `amount_off`
  *   (Stripe takes the discount before adding VAT). `coupons.currencies` limits the currencies accepted for fixed
  *   coupons (empty = any); a fixed coupon works in its own currency only.
+ * - Two deliveries of the same new coupon at once: with symfony/lock (a `LockFactory`) they run one after the other;
+ *   without it the mapping row is inserted before Stripe is called, the loser of the unique constraint answers
+ *   `in_progress` (HTTP 200) and the Stripe create calls carry an idempotency key.
  * - Refusals a retry will not fix (code format, currency, clash with a manual code, Stripe 4xx) go to `sync_error`
  *   and the log without an exception, so AffiWave does not retry forever. A Stripe outage (5xx, 429, network)
  *   throws, so the webhook answers 5xx and AffiWave retries.
@@ -40,6 +46,7 @@ class StripeCouponSynchronizer
         private readonly EntityManagerInterface $em,
         private readonly Settings $settings,
         private readonly LoggerInterface $logger = new NullLogger(),
+        private readonly ?LockFactory $lockFactory = null,
     ) {
     }
 
@@ -54,6 +61,17 @@ class StripeCouponSynchronizer
             return CouponSyncResult::Disabled;
         }
 
+        $lock = $this->lockFactory?->createLock('affiwave_coupon_'.$state->id, 60);
+        $lock?->acquire(true);
+        try {
+            return $this->applyLocked($state, $eventAt);
+        } finally {
+            $lock?->release();
+        }
+    }
+
+    private function applyLocked(CouponState $state, ?\DateTimeImmutable $eventAt): CouponSyncResult
+    {
         $mapping = $this->coupons->findOneByAffiwaveCouponId($state->id);
         // An older event after a newer one is skipped - unless the last attempt ended in an error.
         if (null !== $mapping && null === $mapping->getSyncError() && null !== $eventAt
@@ -72,6 +90,15 @@ class StripeCouponSynchronizer
             $mapping->setLastEventAt($eventAt);
         }
         $this->em->persist($mapping);
+        if ($isNew) {
+            // Claim the coupon before calling Stripe: a concurrent delivery of the same new coupon hits the unique
+            // constraint here instead of creating a second Stripe coupon.
+            try {
+                $this->em->flush();
+            } catch (UniqueConstraintViolationException) {
+                return CouponSyncResult::InProgress;
+            }
+        }
 
         try {
             if ($shapeChanged) {
@@ -85,13 +112,11 @@ class StripeCouponSynchronizer
             }
         } catch (StripeApiException $e) {
             if (!$e->isRejected()) {
-                $this->forget($mapping, $isNew);
+                // The row stays without Stripe ids: the retried event finishes the job.
+                $this->em->flush();
                 throw $e;
             }
             $result = $this->fail($mapping, 'stripe: '.$e->getMessage());
-        } catch (\Throwable $e) {
-            $this->forget($mapping, $isNew);
-            throw $e;
         }
 
         if (CouponSyncResult::Unchanged !== $result && CouponSyncResult::Error !== $result) {
@@ -124,8 +149,12 @@ class StripeCouponSynchronizer
             }
         }
 
-        $coupon = $this->stripe->createCoupon($couponPayload);
-        $promotionCode = $this->stripe->createPromotionCode($this->promotionCodePayload($state, (string) $coupon['id'], $wantActive));
+        // A fresh key per attempt: Stripe replays the stored result (errors included) for a repeated key.
+        $mapping->nextSyncAttempt();
+        $this->em->flush();
+        $key = substr(hash('sha256', $state->id.'|'.$hash.'|'.$mapping->getSyncAttempts()), 0, 40);
+        $coupon = $this->stripe->createCoupon($couponPayload, 'affiwave-c-'.$key);
+        $promotionCode = $this->stripe->createPromotionCode($this->promotionCodePayload($state, (string) $coupon['id'], $wantActive), 'affiwave-p-'.$key);
 
         $mapping->setStripeIds((string) $coupon['id'], (string) $promotionCode['id'])
             ->setConditionsHash($hash)
@@ -133,17 +162,6 @@ class StripeCouponSynchronizer
             ->setSyncError(null);
 
         return $isNew ? CouponSyncResult::Created : CouponSyncResult::Replaced;
-    }
-
-    /**
-     * Failure half-way (Stripe down): a new mapping must not stay in the Unit of Work, or the next flush in this
-     * process would store it without Stripe IDs. An existing one stays - the retried event fixes it.
-     */
-    private function forget(AffiWaveCoupon $mapping, bool $isNew): void
-    {
-        if ($isNew) {
-            $this->em->detach($mapping);
-        }
     }
 
     private function deactivateCurrent(AffiWaveCoupon $mapping): void
@@ -207,7 +225,7 @@ class StripeCouponSynchronizer
             $payload['duration_in_months'] = max(1, $this->settings->couponDurationMonths);
         }
         if (CouponState::TYPE_FIXED === $state->type) {
-            $payload['amount_off'] = $this->netMinor($state->value);
+            $payload['amount_off'] = $this->netMinor($state->value, $state->currency);
             $payload['currency'] = strtolower($state->currency);
         } else {
             $payload['percent_off'] = (float) $state->value;
@@ -216,12 +234,12 @@ class StripeCouponSynchronizer
         return $payload;
     }
 
-    /** Gross discount in main units -> net amount in minor units (VAT rate 0 = unchanged). */
-    private function netMinor(string $gross): int
+    /** Gross discount in main units -> net amount in minor units of its currency (VAT rate 0 = unchanged). */
+    private function netMinor(string $gross, string $currency): int
     {
-        $net = (float) $gross * 100 / (1 + max(0.0, $this->settings->couponVatRate) / 100);
+        $net = (float) $gross / (1 + max(0.0, $this->settings->couponVatRate) / 100);
 
-        return max(1, (int) round($net));
+        return max(3 === Currency::exponent($currency) ? 10 : 1, Currency::toMinor($net, $currency));
     }
 
     /**

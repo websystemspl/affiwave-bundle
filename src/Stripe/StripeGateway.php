@@ -46,14 +46,14 @@ class StripeGateway implements StripeGatewayInterface
         return $this->call(static fn (StripeClient $s) => $s->promotionCodes->retrieve($promotionCodeId));
     }
 
-    public function createCoupon(array $params): array
+    public function createCoupon(array $params, ?string $idempotencyKey = null): array
     {
-        return $this->call(static fn (StripeClient $s) => $s->coupons->create($params));
+        return $this->call(static fn (StripeClient $s) => $s->coupons->create($params, self::options($idempotencyKey)));
     }
 
-    public function createPromotionCode(array $params): array
+    public function createPromotionCode(array $params, ?string $idempotencyKey = null): array
     {
-        return $this->call(static fn (StripeClient $s) => $s->promotionCodes->create($params));
+        return $this->call(static fn (StripeClient $s) => $s->promotionCodes->create($params, self::options($idempotencyKey)));
     }
 
     public function updatePromotionCode(string $id, array $params): array
@@ -74,6 +74,12 @@ class StripeGateway implements StripeGatewayInterface
         }
 
         return $matching;
+    }
+
+    /** @return array{idempotency_key?: string} */
+    private static function options(?string $idempotencyKey): array
+    {
+        return null === $idempotencyKey ? [] : ['idempotency_key' => $idempotencyKey];
     }
 
     /**

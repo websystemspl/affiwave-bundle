@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace AffiWave\Bundle\Tests\Functional;
 
+use AffiWave\Bundle\Config\Settings;
 use AffiWave\Bundle\Coupon\CouponState;
+use AffiWave\Bundle\Repository\AffiWaveCouponRepository;
+use Symfony\Component\Lock\LockFactory;
+use Symfony\Component\Lock\Store\InMemoryStore;
 use AffiWave\Bundle\Coupon\CouponSyncResult;
 use AffiWave\Bundle\Coupon\PromotionCodes;
 use AffiWave\Bundle\Coupon\StripeCouponSynchronizer;
@@ -219,7 +223,7 @@ final class StripeCouponSynchronizerTest extends BundleTestCase
         self::assertTrue($this->mapping()?->isActive());
     }
 
-    public function testStripeOutageThrowsAndLeavesNoMapping(): void
+    public function testStripeOutageThrowsAndKeepsAnUnfinishedMapping(): void
     {
         $this->setUpWith();
         $this->stripe()->failWith = 503;
@@ -231,7 +235,15 @@ final class StripeCouponSynchronizerTest extends BundleTestCase
             self::assertFalse($e->isRejected());
         }
 
-        self::assertSame(0, $this->em->getRepository(AffiWaveCoupon::class)->count([]));
+        $row = $this->mapping();
+        self::assertNull($row?->getStripePromotionCodeId());
+        self::assertFalse($row->isActive());
+        self::assertFalse($this->service(PromotionCodes::class)->hasActive());
+
+        // The retried event finishes the job.
+        $this->stripe()->failWith = null;
+        self::assertSame(CouponSyncResult::Replaced, $this->sync->apply(self::state()));
+        self::assertNotNull($this->mapping()?->getStripePromotionCodeId());
     }
 
     public function testStripeRejectionGoesToSyncError(): void
@@ -241,6 +253,71 @@ final class StripeCouponSynchronizerTest extends BundleTestCase
 
         self::assertSame(CouponSyncResult::Error, $this->sync->apply(self::state()));
         self::assertStringStartsWith('stripe:', (string) $this->mapping()?->getSyncError());
+    }
+
+    public function testCreateCallsCarryIdempotencyKeysThatChangePerAttempt(): void
+    {
+        $this->setUpWith();
+        $this->sync->apply(self::state());
+        $keys = $this->stripe()->idempotencyKeys;
+
+        self::assertCount(2, $keys);
+        self::assertStringStartsWith('affiwave-c-', $keys[0]);
+        self::assertStringStartsWith('affiwave-p-', $keys[1]);
+        self::assertSame(substr($keys[0], 11), substr($keys[1], 11));
+
+        // A changed coupon is a new attempt and must not reuse the key: Stripe would replay the old result.
+        $this->sync->apply(self::state(['discount_value' => '15.00']));
+        self::assertNotSame($keys[0], $this->stripe()->idempotencyKeys[2]);
+    }
+
+    public function testConcurrentDeliveryOfANewCouponIsClaimedOnce(): void
+    {
+        $this->setUpWith();
+        // Another process already inserted the mapping row of this coupon.
+        $this->em->getConnection()->executeStatement(
+            "INSERT INTO affiwave_coupon (code, active, created_at, affiwave_coupon_id, sync_attempts) VALUES ('PARTNER10', 0, '2026-11-01 10:00:00', 42, 0)",
+        );
+        // A synchroniser that has not seen the row (as in a second process) tries to claim the same coupon.
+        $blind = new class($this->em) extends AffiWaveCouponRepository {
+            public function findOneByAffiwaveCouponId(int $id): ?AffiWaveCoupon
+            {
+                return null;
+            }
+        };
+        $sync = new StripeCouponSynchronizer($blind, $this->stripe(), $this->em, $this->service(Settings::class));
+
+        self::assertSame(CouponSyncResult::InProgress, $sync->apply(self::state()));
+        self::assertSame([], $this->stripe()->callsTo('createCoupon'));
+    }
+
+    public function testLockFactoryIsUsedWhenAvailableAndReleased(): void
+    {
+        $this->setUpWith();
+        $factory = new LockFactory(new InMemoryStore());
+        $sync = new StripeCouponSynchronizer(
+            $this->service(AffiWaveCouponRepository::class),
+            $this->stripe(),
+            $this->em,
+            $this->service(Settings::class),
+            lockFactory: $factory,
+        );
+
+        self::assertSame(CouponSyncResult::Created, $sync->apply(self::state()));
+        self::assertFalse($factory->createLock('affiwave_coupon_42')->isAcquired());
+        self::assertSame(CouponSyncResult::Unchanged, $sync->apply(self::state()));
+    }
+
+    public function testFixedCouponInZeroAndThreeDecimalCurrencies(): void
+    {
+        $this->setUpWith();
+
+        $this->sync->apply(self::state(['coupon_id' => 1, 'code' => 'JPYCODE', 'discount_type' => 'fixed', 'discount_value' => '500.00', 'currency' => 'JPY']));
+        $this->sync->apply(self::state(['coupon_id' => 2, 'code' => 'KWDCODE', 'discount_type' => 'fixed', 'discount_value' => '1.25', 'currency' => 'KWD']));
+
+        $coupons = $this->stripe()->callsTo('createCoupon');
+        self::assertSame(500, $coupons[0]['amount_off']);
+        self::assertSame(1250, $coupons[1]['amount_off']);
     }
 
     public function testIncompleteStateIsRejectedByTheDto(): void
