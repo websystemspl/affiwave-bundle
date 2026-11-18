@@ -3,15 +3,24 @@
     "description": "Symfony bundle for SaaS apps integrating with the AffiWave affiliate platform: click attribution, S2S conversions for Stripe payments and partner coupons synced to Stripe promotion codes.",
     "type": "symfony-bundle",
     "license": "MIT",
+    "homepage": "https://github.com/websystemspl/affiwave-bundle",
+    "authors": [
+        {"name": "Web Systems"}
+    ],
+    "support": {
+        "issues": "https://github.com/websystemspl/affiwave-bundle/issues",
+        "source": "https://github.com/websystemspl/affiwave-bundle"
+    },
     "keywords": ["affiwave", "affiliate", "stripe", "symfony", "bundle", "attribution"],
     "require": {
         "php": ">=8.2",
         "doctrine/doctrine-bundle": "^2.12 || ^3.0",
         "doctrine/orm": "^3.0",
-        "psr/log": "^1.0 || ^2.0 || ^3.0",
+        "psr/log": "^2.0 || ^3.0",
         "symfony/config": "^7.4 || ^8.0",
         "symfony/console": "^7.4 || ^8.0",
         "symfony/dependency-injection": "^7.4 || ^8.0",
+        "symfony/doctrine-bridge": "^7.4 || ^8.0",
         "symfony/event-dispatcher": "^7.4 || ^8.0",
         "symfony/framework-bundle": "^7.4 || ^8.0",
         "symfony/http-client": "^7.4 || ^8.0",
@@ -23,10 +32,12 @@
         "phpstan/phpstan": "^2.0",
         "phpunit/phpunit": "^11.5 || ^12.0",
         "stripe/stripe-php": "^19.0 || ^20.0",
+        "symfony/lock": "^7.4 || ^8.0",
         "symfony/var-exporter": "^7.4 || ^8.0"
     },
     "suggest": {
-        "stripe/stripe-php": "Required for the built-in Stripe gateway (partner coupons -> promotion codes, discount lookups)."
+        "stripe/stripe-php": "Required for the built-in Stripe gateway (partner coupons -> promotion codes, discount lookups).",
+        "symfony/lock": "Serialises concurrent webhook deliveries of the same coupon (configure framework.lock)."
     },
     "autoload": {
         "psr-4": {

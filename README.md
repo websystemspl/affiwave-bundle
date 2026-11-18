@@ -71,6 +71,8 @@ affiwave:
         cookie_name: aw_click
         cookie_days: 30             # = cookie duration of the programme
         listener: true              # set the cookie on any response to a request carrying ?aw_click=
+    conversions:
+        max_attempts: 20            # failed deliveries before a conversion is given up (status "rejected")
     stripe:
         secret_key: '%env(default::STRIPE_SECRET_KEY)%'   # for the built-in gateway
     coupons:
@@ -93,6 +95,11 @@ whole integration off: every call becomes a no-op (`ReportOutcome::Disabled`). `
 is a configuration error. The webhook endpoint depends on `webhook_secret` only (empty = HTTP 503).
 
 ## Usage
+
+The cookie is `Secure` when `Request::isSecure()` says so. Behind a TLS-terminating proxy or load balancer, configure
+`framework.trusted_proxies` and `trusted_headers`, otherwise the cookie is set without the `Secure` flag.
+`api_url` should be `https://`: outside `kernel.debug` the client logs a warning (once per process) for any other scheme,
+because the API key travels in every request.
 
 ### 1. Remember the partner at sign-up
 
@@ -189,12 +196,20 @@ final class StripeWebhookController
 | `Duplicate` | AffiWave already had this `external_order_id` (HTTP 200, `duplicate: true`) |
 | `AlreadyReported` | delivered earlier, no request was made |
 | `Rejected` | permanent refusal (400/422: `unknown_token`, `invalid_amount`, ...); stored, never retried |
-| `Failed` | 5xx, 429, `exchange_rate_unavailable`, timeout, 401/403 - stored, retried by the cron command |
+| `Failed` | 5xx, 429, `exchange_rate_unavailable`, timeout, 401/403 - stored, retried by the cron command; after `conversions.max_attempts` attempts the row is given up as `Rejected` (reason in `last_error`) |
+| `Refunded` | result of `refund()`; the stored row becomes `refunded` and is never sent (again) |
 | `Skipped` | nothing to attribute (no valid click token and no coupon) or amount <= 0; **nothing is stored** |
 | `Disabled` | integration off |
 
 A click token wins over a coupon (only `click_token` is then sent). Amounts are sent as strings with two decimals
 (`9900` -> `"99.00"`); the currency is the payment currency, AffiWave converts it to the programme currency itself.
+The currency exponent is respected: zero-decimal currencies (JPY, KRW, ...) are sent as `"1000.00"` for `1000`, and
+three-decimal ones (KWD, BHD, ...) are rounded to two places (`12345` -> `"12.35"`), as the API accepts at most two.
+`customer_email` is sent only when it is a valid address, `customer_ip` only when it is a valid IP (the first valid entry
+of an `X-Forwarded-For` style list is used); invalid values are dropped rather than getting the conversion rejected with 400.
+
+`refund($externalOrderId)` calls `POST /api/conversion/refund` and marks the stored row `refunded`. A conversion AffiWave
+never received (still pending, failed or rejected) is only marked locally, with no request, and is never sent later.
 
 If your prices are gross and you do not use Stripe Tax, implement `NetAmountResolverInterface` and alias it, so the VAT
 is computed the way your application does it:
@@ -228,11 +243,21 @@ Rules of the synchronisation:
 - code, amount, type, currency, usage limit and expiry are immutable in Stripe: a change deactivates the old promotion code
   and creates a new coupon + promotion code; a status change only toggles the code;
 - `fixed` coupons arrive **gross**; with `coupons.vat_rate` > 0 the Stripe `amount_off` is the net equivalent. A fixed
-  coupon works in its own currency only; amounts are minor units of a 2-decimal currency;
+  coupon works in its own currency only, and the currency exponent is respected (JPY has no decimals; three-decimal
+  currencies such as KWD get an amount divisible by 10, as Stripe requires);
 - a code outside `^[A-Za-z0-9-]{1,500}$` (and any other refusal a retry cannot fix) is stored in
   `affiwave_coupon.sync_error` and the webhook still answers 200, so AffiWave does not retry forever;
 - a Stripe outage answers 5xx, so AffiWave retries;
-- events older than the last applied one are skipped; a repeated event changes nothing.
+- events older than the last applied one are skipped; a repeated event changes nothing. Ordering uses the event
+  `created_at` (one-second resolution): two *different* states of one coupon that carry the same timestamp are applied in
+  arrival order, so the later delivery wins. Identical states are no-ops, and the `affiwave:coupons:sync` fallback
+  converges on the state AffiWave holds;
+- two deliveries of the same **new** coupon at once: with `symfony/lock` (a `lock.factory` service, i.e. `framework.lock`
+  configured) they are serialised per coupon; without it the mapping row is inserted before Stripe is called and the loser
+  of the unique constraint answers 200 `result: in_progress`. Stripe create calls carry an idempotency key
+  (coupon id + conditions + attempt number, so a retry after a Stripe error is not served the stored error). With the
+  lock-free path the Doctrine entity manager of the losing request is closed by the constraint violation, which is fine
+  for a webhook request but means a cron run should not overlap a webhook for the same new coupon.
 
 The webhook answers: `400` bad signature or body, `503` no secret configured, `500` failure worth retrying, `200`
 accepted (also: other event types, and events of another `program_id`, which are ignored).
@@ -252,11 +277,12 @@ discount ids only: those are resolved from `affiwave_coupon` first and through t
 17 * * * *    php bin/console affiwave:coupons:sync --since="-2 days"
 ```
 
-- `affiwave:conversions:retry [--limit=100] [--dry-run]` re-sends `pending` and `failed` conversions (AffiWave
-  deduplicates by `external_order_id`).
+- `affiwave:conversions:retry [--limit=100] [--dry-run]` re-sends `pending` and `failed` conversions, the least recently
+  attempted first, so old stuck rows cannot starve new ones (AffiWave deduplicates by `external_order_id`).
 - `affiwave:coupons:sync [--since=...|--all]` reads `GET /api/coupon_codes?changedSince=` (50 per page; API key scope
   `reports:read`) and feeds the same path as the webhook - the fallback for missed webhooks (AffiWave disables an endpoint
-  after a run of failures).
+  after a run of failures). `GET /api/coupon_codes` does not return the programme, so the `program_id` filter applies to
+  webhooks only; narrow the sync down with an API key bound to the programme.
 
 ## Setup on the AffiWave side
 

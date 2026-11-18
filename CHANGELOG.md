@@ -19,3 +19,18 @@ All notable changes to this project are documented here. The format follows
   (AffiWave coupons -> Stripe coupons and promotion codes), `AffiWaveCoupon` entity (`affiwave_coupon`),
   `PromotionCodes::hasActive()` and the `affiwave:coupons:sync` fallback command.
 - Doctrine mapping registered by the bundle; no migrations shipped.
+- Currency exponents (`Money\Currency`): zero-decimal (JPY, KRW, ...) and three-decimal (KWD, BHD, ...) currencies in
+  the conversion `amount` (always two decimals, three-decimal rounded) and in fixed-coupon `amount_off`.
+- `conversions.max_attempts` (default 20): a conversion that keeps failing is given up as `rejected` with the reason in
+  `last_error`; `affiwave:conversions:retry` takes the least recently attempted rows first (`last_attempt_at`).
+- `ConversionReporter::refund()` marks the stored conversion `refunded`; a never delivered one is refunded locally
+  without a request and never sent afterwards.
+- Concurrent deliveries of one new coupon: optional `symfony/lock` per coupon, otherwise the mapping row is claimed
+  before Stripe is called (`in_progress` result), plus idempotency keys on Stripe create calls.
+- A readable error when `coupons.enabled` has no Stripe gateway; a warning when `api_url` is not HTTPS outside debug.
+
+### Changed
+
+- `customer_email` / `customer_ip` are sent only when valid (the first valid IP of a forwarded list), so AffiWave no
+  longer rejects the whole conversion over them.
+- `GET /api/coupon_codes` items carry no programme: the `program_id` filter applies to webhooks only.
