@@ -11,6 +11,7 @@ use AffiWave\Bundle\Repository\AffiWaveCouponRepository;
 use AffiWave\Bundle\Stripe\StripeGateway;
 use AffiWave\Bundle\Stripe\StripeGatewayInterface;
 use Symfony\Component\Config\Definition\Configurator\DefinitionConfigurator;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
@@ -62,6 +63,12 @@ final class AffiWaveBundle extends AbstractBundle
                         ->booleanNode('listener')->defaultTrue()->info('Remember the click token in a first-party cookie.')->end()
                     ->end()
                 ->end()
+                ->arrayNode('conversions')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->integerNode('max_attempts')->defaultValue(20)->min(1)->info('Delivery attempts before a failing conversion is given up (status "rejected").')->end()
+                    ->end()
+                ->end()
                 ->arrayNode('coupons')
                     ->addDefaultsIfNotSet()
                     ->children()
@@ -97,6 +104,7 @@ final class AffiWaveBundle extends AbstractBundle
         $parameters->set('affiwave.click.query_parameter', $config['click']['query_parameter']);
         $parameters->set('affiwave.click.cookie_name', $config['click']['cookie_name']);
         $parameters->set('affiwave.click.cookie_days', $config['click']['cookie_days']);
+        $parameters->set('affiwave.conversions.max_attempts', $config['conversions']['max_attempts']);
         $parameters->set('affiwave.coupons.enabled', $config['coupons']['enabled']);
         $parameters->set('affiwave.coupons.duration', $config['coupons']['duration']);
         $parameters->set('affiwave.coupons.duration_months', $config['coupons']['duration_months']);
@@ -125,6 +133,7 @@ final class AffiWaveBundle extends AbstractBundle
                     service('doctrine.orm.entity_manager'),
                     service(Settings::class),
                     service('logger')->nullOnInvalid(),
+                    service('lock.factory')->nullOnInvalid(),
                 ])
                 ->public();
         }
@@ -137,9 +146,19 @@ final class AffiWaveBundle extends AbstractBundle
         }
     }
 
-    /**
-     * @param ContainerConfigurator $container
-     */
+    public function build(ContainerBuilder $container): void
+    {
+        $container->addCompilerPass(new class implements CompilerPassInterface {
+            public function process(ContainerBuilder $container): void
+            {
+                if ($container->hasDefinition(StripeCouponSynchronizer::class)
+                    && !$container->hasDefinition(StripeGatewayInterface::class) && !$container->hasAlias(StripeGatewayInterface::class)) {
+                    throw new \LogicException('affiwave.coupons.enabled needs a Stripe gateway: run "composer require stripe/stripe-php" or register your own implementation of '.StripeGatewayInterface::class.' (alias it to that interface).');
+                }
+            }
+        });
+    }
+
     public function prependExtension(ContainerConfigurator $container, ContainerBuilder $builder): void
     {
         if (!$builder->hasExtension('doctrine')) {

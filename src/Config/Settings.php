@@ -29,6 +29,7 @@ final class Settings
         public readonly int $couponDurationMonths = 1,
         public readonly float $couponVatRate = 0.0,
         array|string|null $couponCurrencies = [],
+        public readonly int $conversionMaxAttempts = 20,
     ) {
         if (\is_string($couponCurrencies)) {
             $couponCurrencies = explode(',', $couponCurrencies);

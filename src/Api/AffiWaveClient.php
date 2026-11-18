@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace AffiWave\Bundle\Api;
 
 use AffiWave\Bundle\Config\Settings;
+use Psr\Log\LoggerInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
@@ -17,8 +18,12 @@ class AffiWaveClient
     public function __construct(
         private readonly HttpClientInterface $httpClient,
         private readonly Settings $settings,
+        private readonly ?LoggerInterface $logger = null,
+        private readonly bool $debug = false,
     ) {
     }
+
+    private bool $warnedInsecure = false;
 
     public function isEnabled(): bool
     {
@@ -69,6 +74,7 @@ class AffiWaveClient
      */
     private function request(string $method, string $path, array $options): ApiResult
     {
+        $this->warnIfInsecure();
         $timeout = $this->settings->httpTimeout;
         $response = $this->httpClient->request($method, $this->settings->apiUrl().$path, $options + [
             'auth_bearer' => $this->settings->apiKey(),
@@ -82,5 +88,15 @@ class AffiWaveClient
         $decoded = json_decode($raw, true);
 
         return new ApiResult($status, \is_array($decoded) ? $decoded : [], $raw);
+    }
+
+    /** The Bearer key travels in every request: outside debug, a non-HTTPS API URL is worth a warning (once). */
+    private function warnIfInsecure(): void
+    {
+        if ($this->debug || $this->warnedInsecure || str_starts_with(strtolower($this->settings->apiUrl()), 'https://')) {
+            return;
+        }
+        $this->warnedInsecure = true;
+        $this->logger?->warning('[AffiWave] affiwave.api_url is not an https:// URL: the API key is sent unencrypted.');
     }
 }

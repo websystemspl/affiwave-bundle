@@ -40,7 +40,7 @@ return static function (ContainerConfigurator $container): void {
         '$couponCurrencies' => param('affiwave.coupons.currencies'),
     ]);
 
-    $services->set(AffiWaveClient::class)->args([service('http_client'), service(Settings::class)]);
+    $services->set(AffiWaveClient::class)->args([service('http_client'), service(Settings::class), service('logger')->nullOnInvalid(), param('kernel.debug')]);
 
     $services->set(ClickTokenResolver::class)
         ->args([param('affiwave.click.query_parameter'), param('affiwave.click.cookie_name')])
@@ -49,7 +49,15 @@ return static function (ContainerConfigurator $container): void {
     $services->set(AffiWaveConversionRepository::class);
     $services->set(AffiWaveCouponRepository::class);
 
-    $services->set(ConversionReporter::class)->public();
+    $services->set(ConversionReporter::class)
+        ->args([
+            service(AffiWaveClient::class),
+            service('doctrine.orm.entity_manager'),
+            service(AffiWaveConversionRepository::class),
+            service('logger')->nullOnInvalid(),
+            param('affiwave.conversions.max_attempts'),
+        ])
+        ->public();
 
     $services->set(PromotionCodes::class)->public();
     $services->set(DiscountCodeResolver::class)
