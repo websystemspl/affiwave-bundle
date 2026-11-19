@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-19
+
+### Changed
+
+- The bundle no longer uses an AffiWave programme id. The programme is defined in AffiWave by the API key and the
+  webhook (each bound to one programme), so the webhook no longer filters events by `program_id` and
+  `Settings::programId()` is gone.
+
+### Deprecated
+
+- The `affiwave.program_id` option: accepted but ignored, removed in 1.0. Drop it and `AFFIWAVE_PROGRAM_ID` from your
+  configuration.
+
+### Removed
+
+- The `affiwave.program_id` container parameter and the webhook answer `ignored: other_program`.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added

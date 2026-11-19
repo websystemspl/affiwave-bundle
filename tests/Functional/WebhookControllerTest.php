@@ -18,7 +18,7 @@ final class WebhookControllerTest extends BundleTestCase
     private function bootWebhook(array $config = []): void
     {
         $this->boot($config + [
-            'api_url' => 'https://affiwave.example', 'api_key' => 'k', 'webhook_secret' => self::SECRET, 'program_id' => 3,
+            'api_url' => 'https://affiwave.example', 'api_key' => 'k', 'webhook_secret' => self::SECRET,
             'coupons' => ['enabled' => true],
         ]);
     }
@@ -78,21 +78,9 @@ final class WebhookControllerTest extends BundleTestCase
         self::assertSame(503, $this->post(self::eventBody(), 't=1,v1=ab')->getStatusCode());
     }
 
-    public function testEventOfAnotherProgramIsIgnoredWith200(): void
+    public function testEventOfAnyProgramIsHandled(): void
     {
         $this->bootWebhook();
-
-        $response = $this->post(self::eventBody(['program_id' => 99]));
-
-        self::assertSame(200, $response->getStatusCode());
-        self::assertSame(['received' => true, 'handled' => false, 'ignored' => 'other_program'], self::json($response));
-        self::assertSame([], $this->stripe()->calls);
-        self::assertSame(0, $this->em->getRepository(AffiWaveCoupon::class)->count([]));
-    }
-
-    public function testAnyProgramIsAcceptedWithoutProgramId(): void
-    {
-        $this->bootWebhook(['program_id' => null]);
 
         self::assertTrue(self::json($this->post(self::eventBody(['program_id' => 99])))['handled']);
     }

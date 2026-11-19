@@ -64,7 +64,6 @@ affiwave:
     api_url: '%env(default::AFFIWAVE_API_URL)%'            # e.g. https://affiwave.example
     api_key: '%env(default::AFFIWAVE_API_KEY)%'            # scope conversions:write (+ reports:read for the coupon sync)
     webhook_secret: '%env(default::AFFIWAVE_WEBHOOK_SECRET)%'   # whsec_... shown once when the webhook is created
-    program_id: '%env(default::int:AFFIWAVE_PROGRAM_ID)%'  # optional: ignore events of other programmes
     http_timeout: 5
     click:
         query_parameter: aw_click   # must equal the attribution parameter of the programme in AffiWave
@@ -87,12 +86,15 @@ affiwave:
 AFFIWAVE_API_URL=https://affiwave.example
 AFFIWAVE_API_KEY=
 AFFIWAVE_WEBHOOK_SECRET=
-AFFIWAVE_PROGRAM_ID=
 ```
 
 `enabled` defaults to "on when `api_url` and `api_key` are both non-empty at runtime", so an empty env var switches the
 whole integration off: every call becomes a no-op (`ReportOutcome::Disabled`). `enabled: true` with a missing URL or key
 is a configuration error. The webhook endpoint depends on `webhook_secret` only (empty = HTTP 503).
+
+There is no programme id setting: in AffiWave the API key and the webhook are each bound to one programme, so the key
+only sees that programme's data and the webhook only receives its events. The `program_id` option of 0.1 is still
+accepted but ignored (deprecated, removed in 1.0).
 
 ## Usage
 
@@ -260,7 +262,7 @@ Rules of the synchronisation:
   for a webhook request but means a cron run should not overlap a webhook for the same new coupon.
 
 The webhook answers: `400` bad signature or body, `503` no secret configured, `500` failure worth retrying, `200`
-accepted (also: other event types, and events of another `program_id`, which are ignored).
+accepted (other event types are acknowledged and ignored).
 
 Listen to `AffiWave\Bundle\Coupon\CouponChangedEvent` (dispatched before the Stripe sync, with or without
 `coupons.enabled`) to keep coupons somewhere else too. To use your own Stripe client instead of the built-in gateway,
@@ -281,8 +283,7 @@ discount ids only: those are resolved from `affiwave_coupon` first and through t
   attempted first, so old stuck rows cannot starve new ones (AffiWave deduplicates by `external_order_id`).
 - `affiwave:coupons:sync [--since=...|--all]` reads `GET /api/coupon_codes?changedSince=` (50 per page; API key scope
   `reports:read`) and feeds the same path as the webhook - the fallback for missed webhooks (AffiWave disables an endpoint
-  after a run of failures). `GET /api/coupon_codes` does not return the programme, so the `program_id` filter applies to
-  webhooks only; narrow the sync down with an API key bound to the programme.
+  after a run of failures). The API key is bound to the programme, so the sync only sees that programme's coupons.
 
 ## Setup on the AffiWave side
 

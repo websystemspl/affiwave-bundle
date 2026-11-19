@@ -21,7 +21,6 @@ final class Settings
         private readonly ?string $apiUrl = null,
         private readonly ?string $apiKey = null,
         private readonly ?string $webhookSecret = null,
-        private readonly int|string|null $programId = null,
         private readonly ?bool $enabled = null,
         public readonly float $httpTimeout = 5.0,
         public readonly bool $couponsEnabled = false,
@@ -53,13 +52,6 @@ final class Settings
     public function webhookSecret(): string
     {
         return trim((string) $this->webhookSecret);
-    }
-
-    public function programId(): ?int
-    {
-        $id = (int) $this->programId;
-
-        return $id > 0 ? $id : null;
     }
 
     /** Explicit `enabled: false` wins; otherwise the integration is on when both api_url and api_key are set. */

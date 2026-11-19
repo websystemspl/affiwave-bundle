@@ -39,11 +39,8 @@ final class AffiWaveBundle extends AbstractBundle
                 ->scalarNode('webhook_secret')->defaultNull()->info('Signing secret of the AffiWave webhook (whsec_...). Empty = the webhook endpoint answers 503.')->end()
                 ->scalarNode('program_id')
                     ->defaultNull()
-                    ->validate()
-                        ->ifTrue(static fn (mixed $v): bool => null !== $v && '' !== $v && !\is_int($v) && !(\is_string($v) && (ctype_digit($v) || str_contains($v, '%'))))
-                        ->thenInvalid('"affiwave.program_id" must be an integer (or an %env(int:...)% value).')
-                    ->end()
-                    ->info('Only coupon events of this AffiWave programme are applied. Null or 0 = any.')
+                    ->setDeprecated('websystemspl/affiwave-bundle', '0.2', 'The "%node%" option is ignored and will be removed in 1.0: the programme is defined in AffiWave by the API key and the webhook.')
+                    ->info('Ignored (deprecated since 0.2). The API key and the webhook are bound to one programme in AffiWave.')
                 ->end()
                 ->booleanNode('enabled')->defaultNull()->info('Null = on when api_url and api_key are both non-empty at runtime.')->end()
                 ->floatNode('http_timeout')->defaultValue(5)->info('Seconds for calls to the AffiWave API.')->end()
@@ -98,7 +95,6 @@ final class AffiWaveBundle extends AbstractBundle
         $parameters->set('affiwave.api_url', $config['api_url']);
         $parameters->set('affiwave.api_key', $config['api_key']);
         $parameters->set('affiwave.webhook_secret', $config['webhook_secret']);
-        $parameters->set('affiwave.program_id', $config['program_id']);
         $parameters->set('affiwave.enabled', $config['enabled']);
         $parameters->set('affiwave.http_timeout', $config['http_timeout']);
         $parameters->set('affiwave.click.query_parameter', $config['click']['query_parameter']);

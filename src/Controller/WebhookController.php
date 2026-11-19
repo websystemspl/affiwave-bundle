@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace AffiWave\Bundle\Controller;
 
-use AffiWave\Bundle\Config\Settings;
 use AffiWave\Bundle\Coupon\CouponChangedEvent;
 use AffiWave\Bundle\Coupon\CouponState;
 use AffiWave\Bundle\Coupon\StripeCouponSynchronizer;
@@ -22,8 +21,8 @@ use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
  *
  * Answers: 400 bad signature or body (a retry will not help - see AffiWave's delivery log), 503 no webhook secret,
  * 500 failure worth retrying (Stripe outage, listener exception), 200 accepted - also when the coupon cannot be
- * created for a reason a retry will not fix (`result: error`, reason in `affiwave_coupon.sync_error`) and when
- * the event belongs to another programme than `affiwave.program_id`.
+ * created for a reason a retry will not fix (`result: error`, reason in `affiwave_coupon.sync_error`).
+ * The programme is not checked: an AffiWave webhook only receives events of the programme it is bound to.
  */
 final class WebhookController
 {
@@ -31,7 +30,6 @@ final class WebhookController
 
     public function __construct(
         private readonly WebhookSignatureVerifier $verifier,
-        private readonly Settings $settings,
         private readonly EventDispatcherInterface $dispatcher,
         private readonly ?StripeCouponSynchronizer $synchronizer = null,
         private readonly LoggerInterface $logger = new NullLogger(),
@@ -62,11 +60,6 @@ final class WebhookController
             $state = CouponState::fromWebhook($data);
         } catch (\InvalidArgumentException $e) {
             return new JsonResponse(['error' => $e->getMessage()], Response::HTTP_BAD_REQUEST);
-        }
-
-        $programId = $this->settings->programId();
-        if (null !== $programId && null !== $state->programId && $state->programId !== $programId) {
-            return new JsonResponse(['received' => true, 'handled' => false, 'ignored' => 'other_program']);
         }
 
         try {

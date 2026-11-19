@@ -24,17 +24,15 @@ final class BundleConfigurationTest extends BundleTestCase
         self::assertSame(5.0, $settings->httpTimeout);
         self::assertFalse($settings->couponsEnabled);
         self::assertSame([], $settings->couponCurrencies);
-        self::assertNull($settings->programId());
         self::assertFalse($this->service(PromotionCodes::class)->hasActive());
     }
 
     public function testEnabledWhenApiUrlAndKeyArePresent(): void
     {
-        $this->boot(['api_url' => 'https://affiwave.example', 'api_key' => 'key', 'program_id' => 7, 'coupons' => ['currencies' => 'pln, eur']]);
+        $this->boot(['api_url' => 'https://affiwave.example', 'api_key' => 'key', 'coupons' => ['currencies' => 'pln, eur']]);
 
         $settings = $this->service(Settings::class);
         self::assertTrue($settings->isEnabled());
-        self::assertSame(7, $settings->programId());
         self::assertSame(['PLN', 'EUR'], $settings->couponCurrencies);
         self::assertTrue($this->service(ConversionReporter::class)->isEnabled());
     }
@@ -44,6 +42,14 @@ final class BundleConfigurationTest extends BundleTestCase
         $this->boot(['api_url' => 'https://affiwave.example', 'api_key' => 'key', 'enabled' => false]);
 
         self::assertFalse($this->service(Settings::class)->isEnabled());
+    }
+
+    public function testDeprecatedProgramIdIsAcceptedAndIgnored(): void
+    {
+        $this->boot(['api_url' => 'https://affiwave.example', 'api_key' => 'key', 'program_id' => 7]);
+
+        self::assertTrue($this->service(Settings::class)->isEnabled());
+        self::assertFalse($this->kernel->getContainer()->hasParameter('affiwave.program_id'));
     }
 
     public function testEnabledTrueWithoutKeyIsRejected(): void

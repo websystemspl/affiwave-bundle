@@ -30,7 +30,6 @@ return static function (ContainerConfigurator $container): void {
         '$apiUrl' => param('affiwave.api_url'),
         '$apiKey' => param('affiwave.api_key'),
         '$webhookSecret' => param('affiwave.webhook_secret'),
-        '$programId' => param('affiwave.program_id'),
         '$enabled' => param('affiwave.enabled'),
         '$httpTimeout' => param('affiwave.http_timeout'),
         '$couponsEnabled' => param('affiwave.coupons.enabled'),
